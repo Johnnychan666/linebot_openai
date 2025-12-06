@@ -35,7 +35,6 @@ line_bot_api = LineBotApi(os.getenv('CHANNEL_ACCESS_TOKEN'))
 # Channel Secret
 handler = WebhookHandler(os.getenv('CHANNEL_SECRET'))
 
-
 # ===================================
 # UDN 運動新聞爬蟲設定（用 Selenium）
 # ===================================
@@ -43,8 +42,10 @@ URL = 'https://udn.com/news/cate/2/7227'  # 運動新聞
 BASE_URL = 'https://udn.com'
 CLICK_COUNT = 8
 WAIT_TIMEOUT = 30
-# 請改成你自己的 chromedriver 路徑
-CHROMEDRIVER_PATH = r'/Users/weixiang/Downloads/chromedriver'
+
+# ✅ 改成從環境變數讀取
+CHROMEDRIVER_PATH = os.getenv('CHROMEDRIVER_PATH')   # 例如：/app/.chromedriver/bin/chromedriver
+GOOGLE_CHROME_BIN = os.getenv('GOOGLE_CHROME_BIN')   # 例如：/app/.apt/usr/bin/google-chrome
 
 
 def count_articles(driver):
@@ -55,12 +56,6 @@ def count_articles(driver):
 def scrape_udn_with_selenium(click_times):
     """回傳一個 list，裡面每筆是 {'標題':..., '連結':...}"""
     final_data = []
-
-    # 檢查 ChromeDriver 執行檔是否存在
-    if not os.path.exists(CHROMEDRIVER_PATH):
-        print("❌ 致命錯誤：指定的 ChromeDriver 執行檔路徑不存在！")
-        print(f"請檢查路徑: {CHROMEDRIVER_PATH}")
-        return []
 
     # --- Chrome 選項設定 ---
     chrome_options = Options()
@@ -73,14 +68,27 @@ def scrape_udn_with_selenium(click_times):
         'Chrome/143.0.7499.41 Safari/537.36'
     )
 
+    # ✅ 若在 Heroku，會用 GOOGLE_CHROME_BIN
+    if GOOGLE_CHROME_BIN:
+        chrome_options.binary_location = GOOGLE_CHROME_BIN
+
     # 初始化 WebDriver
     try:
-        service_obj = Service(CHROMEDRIVER_PATH)
+        print(f"[爬蟲] 使用 CHROMEDRIVER_PATH = {CHROMEDRIVER_PATH}")
+
+        if CHROMEDRIVER_PATH:
+            service_obj = Service(CHROMEDRIVER_PATH)
+        else:
+            # 沒設定就假設 chromedriver 在 PATH 裡
+            service_obj = Service()
+
         driver = webdriver.Chrome(service=service_obj, options=chrome_options)
         time.sleep(1)
     except Exception as e:
         print("❌ 錯誤：無法啟動瀏覽器。")
-        print("請檢查您的 ChromeDriver 執行權限 (chmod +x)。")
+        print("可能原因：")
+        print("1. CHROMEDRIVER_PATH 設錯或找不到 chromedriver")
+        print("2. 沒有安裝 Chrome / Chromium")
         print(f"原始錯誤訊息: {e}")
         return []
 
@@ -139,21 +147,18 @@ def scrape_udn_with_selenium(click_times):
                     '連結': full_link,
                 })
 
+    print(f"[爬蟲] 共取得 {len(final_data)} 筆資料")
     return final_data
 
 
 # ==========================
 # Flask / LINE Webhook
 # ==========================
-# 監聽所有來自 /callback 的 Post Request
 @app.route("/callback", methods=['POST'])
 def callback():
-    # get X-Line-Signature header value
     signature = request.headers['X-Line-Signature']
-    # get request body as text
     body = request.get_data(as_text=True)
     app.logger.info("Request body: " + body)
-    # handle webhook body
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
@@ -166,11 +171,6 @@ def callback():
 # ==========================
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text_message(event):
-    """
-    收到任何文字訊息 → 回傳一個按鈕模板訊息，
-    目前只有「運動新聞」這個選項
-    """
-
     buttons_template = TemplateSendMessage(
         alt_text='功能選單',
         template=ButtonsTemplate(
@@ -198,7 +198,6 @@ def handle_postback(event):
     print(f"[Postback] data = {data}")
 
     if data == 'action=sports_news':
-        # 開始爬取文章
         scraped_data = scrape_udn_with_selenium(click_times=CLICK_COUNT)
 
         if not scraped_data:
@@ -216,10 +215,8 @@ def handle_postback(event):
             text = f"{i}. {row['標題']}\n{row['連結']}"
             messages.append(TextSendMessage(text=text))
 
-        # LINE 一次最多回傳 5 則訊息，剛好
         line_bot_api.reply_message(event.reply_token, messages)
     else:
-        # 其他未定義的 Postback
         line_bot_api.reply_message(
             event.reply_token,
             TextSendMessage(text='這個功能尚未支援唷！')
@@ -244,5 +241,4 @@ def welcome(event):
 # ==========================
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
-    # host 設 0.0.0.0 才能被外部（如 Heroku）訪問
     app.run(host='0.0.0.0', port=port)
