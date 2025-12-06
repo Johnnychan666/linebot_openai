@@ -283,6 +283,67 @@ def callback():
 
 
 # ==========================
+# FollowEvent：新加好友 / 新開 1:1 聊天
+# ==========================
+@handler.add(FollowEvent)
+def handle_follow(event):
+    intro_text = (
+        "嗨，我是你的「新聞內容助理」📊📰\n\n"
+        "我可以幫你：\n"
+        "1️⃣ 看運動、全球、股市、社會、產經的最新新聞（每次 5 則，往後可以看更舊的）\n"
+        "2️⃣ 根據你看過的新聞標題，做詞頻柱狀圖＋文字雲，幫你做簡單的文字探勘分析\n\n"
+        "之後你只要傳訊息跟我說「我想看新聞」，我就會請你選擇新聞類別 😊"
+    )
+
+    # 跟平常一樣的「請選擇類別」泡泡＋ Quick Reply
+    category_msg = TextSendMessage(
+        text='請先選擇想看的新聞類別：',
+        quick_reply=QuickReply(items=[
+            QuickReplyButton(
+                action=PostbackAction(
+                    label='運動新聞',
+                    display_text='我要看運動新聞',
+                    data='action=news&cat=sports'
+                )
+            ),
+            QuickReplyButton(
+                action=PostbackAction(
+                    label='全球新聞',
+                    display_text='我要看全球新聞',
+                    data='action=news&cat=global'
+                )
+            ),
+            QuickReplyButton(
+                action=PostbackAction(
+                    label='股市新聞',
+                    display_text='我要看股市新聞',
+                    data='action=news&cat=stock'
+                )
+            ),
+            QuickReplyButton(
+                action=PostbackAction(
+                    label='社會新聞',
+                    display_text='我要看社會新聞',
+                    data='action=news&cat=social'
+                )
+            ),
+            QuickReplyButton(
+                action=PostbackAction(
+                    label='產經新聞',
+                    display_text='我要看產經新聞',
+                    data='action=news&cat=econ'
+                )
+            ),
+        ])
+    )
+
+    line_bot_api.reply_message(event.reply_token, [
+        TextSendMessage(text=intro_text),
+        category_msg
+    ])
+
+
+# ==========================
 # 處理文字訊息
 # ==========================
 @handler.add(MessageEvent, message=TextMessage)
@@ -343,7 +404,7 @@ def handle_text_message(event):
 
         # === 其他文字 → 顯示「一個泡泡 + 5 個 Quick Reply 按鈕」 ===
         msg = TextSendMessage(
-            text='請選擇想看的新聞類別',
+            text='請選擇想看的新聞類別：',
             quick_reply=QuickReply(items=[
                 QuickReplyButton(
                     action=PostbackAction(
