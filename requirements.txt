@@ -1,6 +1,6 @@
 line-bot-sdk
 flask
-openai<1.0.0
 gunicorn
 selenium
 beautifulsoup4
+
