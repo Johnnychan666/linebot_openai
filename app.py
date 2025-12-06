@@ -9,23 +9,15 @@ from linebot.exceptions import (
 from linebot.models import *
 
 # ====== python 的函數庫 ==========
-import tempfile, os
-import datetime
+import os
 import time
 import traceback
 # ====== python 的函數庫 ==========
 
-# ====== Selenium + 爬蟲相關套件 ==========
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+# ====== 爬蟲相關套件（改用 requests + BeautifulSoup） ==========
+import requests
 from bs4 import BeautifulSoup
-import csv
-import sys
-# ====== Selenium + 爬蟲相關套件 ==========
+# ====== 爬蟲相關套件 ==========
 
 app = Flask(__name__)
 static_tmp_path = os.path.join(os.path.dirname(__file__), 'static', 'tmp')
@@ -36,119 +28,61 @@ line_bot_api = LineBotApi(os.getenv('CHANNEL_ACCESS_TOKEN'))
 handler = WebhookHandler(os.getenv('CHANNEL_SECRET'))
 
 # ===================================
-# UDN 運動新聞爬蟲設定（用 Selenium）
+# UDN 運動新聞爬蟲設定（不用 Selenium）
 # ===================================
 URL = 'https://udn.com/news/cate/2/7227'  # 運動新聞
 BASE_URL = 'https://udn.com'
-CLICK_COUNT = 8
-WAIT_TIMEOUT = 30
-
-# ✅ 改成從環境變數讀取
-CHROMEDRIVER_PATH = os.getenv('CHROMEDRIVER_PATH')   # 例如：/app/.chromedriver/bin/chromedriver
-GOOGLE_CHROME_BIN = os.getenv('GOOGLE_CHROME_BIN')   # 例如：/app/.apt/usr/bin/google-chrome
 
 
-def count_articles(driver):
-    """計算當前 DOM 中符合選擇器的文章數量。"""
-    return len(driver.find_elements(By.CSS_SELECTOR, 'div.story-list__text a'))
+def scrape_udn_latest(limit=5):
+    """
+    直接用 requests 拿分類頁 HTML，
+    回傳一個 list，裡面每筆是 {'標題':..., '連結':...}
+    """
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/123.0.0.0 Safari/537.36"
+        )
+    }
 
-
-def scrape_udn_with_selenium(click_times):
-    """回傳一個 list，裡面每筆是 {'標題':..., '連結':...}"""
-    final_data = []
-
-    # --- Chrome 選項設定 ---
-    chrome_options = Options()
-    chrome_options.add_argument("--headless")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument(
-        'user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-        'AppleWebKit/537.36 (KHTML, like Gecko) '
-        'Chrome/143.0.7499.41 Safari/537.36'
-    )
-
-    # ✅ 若在 Heroku，會用 GOOGLE_CHROME_BIN
-    if GOOGLE_CHROME_BIN:
-        chrome_options.binary_location = GOOGLE_CHROME_BIN
-
-    # 初始化 WebDriver
     try:
-        print(f"[爬蟲] 使用 CHROMEDRIVER_PATH = {CHROMEDRIVER_PATH}")
-
-        if CHROMEDRIVER_PATH:
-            service_obj = Service(CHROMEDRIVER_PATH)
-        else:
-            # 沒設定就假設 chromedriver 在 PATH 裡
-            service_obj = Service()
-
-        driver = webdriver.Chrome(service=service_obj, options=chrome_options)
-        time.sleep(1)
+        resp = requests.get(URL, headers=headers, timeout=10)
+        resp.raise_for_status()
     except Exception as e:
-        print("❌ 錯誤：無法啟動瀏覽器。")
-        print("可能原因：")
-        print("1. CHROMEDRIVER_PATH 設錯或找不到 chromedriver")
-        print("2. 沒有安裝 Chrome / Chromium")
-        print(f"原始錯誤訊息: {e}")
+        print("❌ 取得 UDN 頁面失敗：", e)
         return []
 
-    driver.get(URL)
-    print(f"--- 啟動瀏覽器並載入運動新聞頁面 ---")
+    soup = BeautifulSoup(resp.text, 'html.parser')
 
-    # 模擬點擊「更多」按鈕
-    for i in range(click_times):
-        try:
-            print(f"--- 模擬點擊第 {i + 1} 次 More 按鈕 ---")
-
-            initial_article_count = count_articles(driver)
-            print(f"  [偵測] 點擊前文章數量: {initial_article_count}")
-
-            more_button = WebDriverWait(driver, WAIT_TIMEOUT).until(
-                EC.presence_of_element_located((By.CLASS_NAME, "btn-more--news"))
-            )
-
-            if more_button.is_displayed() and more_button.is_enabled():
-                driver.execute_script("arguments[0].scrollIntoView(true);", more_button)
-                driver.execute_script("arguments[0].click();", more_button)
-
-                WebDriverWait(driver, WAIT_TIMEOUT).until(
-                    lambda d: count_articles(d) > initial_article_count
-                )
-
-                final_article_count = count_articles(driver)
-                newly_loaded = final_article_count - initial_article_count
-                print(f"  [成功] 載入完成，新增 {newly_loaded} 筆資料。總數: {final_article_count}")
-            else:
-                print("More 按鈕不可用或已全部載入完畢，停止點擊。")
-                break
-
-        except Exception as e:
-            print(f"點擊第 {i + 1} 次失敗或載入完成: Timeout 或 {e}")
-            break
-
-    print("\n--- 開始解析 HTML 內容 ---")
-
-    final_html = driver.page_source
-    driver.quit()
-
-    soup = BeautifulSoup(final_html, 'html.parser')
+    # 這個選擇器延用你原本 Selenium 用的
     news_elements = soup.select('div.story-list__text a')
 
+    data = []
     for element in news_elements:
-        title = element.text.strip()
-        relative_link = element.get('href')
+        title = element.get_text(strip=True)
+        href = element.get('href')
 
-        if title and relative_link:
-            full_link = f"{BASE_URL}{relative_link}" if relative_link.startswith('/') else relative_link
+        if not title or not href:
+            continue
 
-            if 'udn.com' in full_link:
-                final_data.append({
-                    '標題': title,
-                    '連結': full_link,
-                })
+        if href.startswith('/'):
+            href = BASE_URL + href
 
-    print(f"[爬蟲] 共取得 {len(final_data)} 筆資料")
-    return final_data
+        if 'udn.com' not in href:
+            continue
+
+        data.append({
+            '標題': title,
+            '連結': href,
+        })
+
+        if len(data) >= limit:
+            break
+
+    print(f"[爬蟲] 共取得 {len(data)} 筆資料（已截到 {limit} 筆）")
+    return data
 
 
 # ==========================
@@ -198,20 +132,18 @@ def handle_postback(event):
     print(f"[Postback] data = {data}")
 
     if data == 'action=sports_news':
-        scraped_data = scrape_udn_with_selenium(click_times=CLICK_COUNT)
+        # 開始爬取最新文章（前 5 則）
+        news_list = scrape_udn_latest(limit=5)
 
-        if not scraped_data:
+        if not news_list:
             line_bot_api.reply_message(
                 event.reply_token,
                 TextSendMessage(text='目前無法取得運動新聞，請稍後再試。')
             )
             return
 
-        # 取最新的前 5 筆
-        top5 = scraped_data[:5]
-
         messages = []
-        for i, row in enumerate(top5, start=1):
+        for i, row in enumerate(news_list, start=1):
             text = f"{i}. {row['標題']}\n{row['連結']}"
             messages.append(TextSendMessage(text=text))
 
