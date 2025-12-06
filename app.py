@@ -10,14 +10,13 @@ from linebot.models import *
 
 # ====== python 的函數庫 ==========
 import os
-import time
 import traceback
 # ====== python 的函數庫 ==========
 
-# ====== 爬蟲相關套件（改用 requests + BeautifulSoup） ==========
+# ====== 靜態爬蟲相關套件 ==========
 import requests
 from bs4 import BeautifulSoup
-# ====== 爬蟲相關套件 ==========
+# ====== 靜態爬蟲相關套件 ==========
 
 app = Flask(__name__)
 static_tmp_path = os.path.join(os.path.dirname(__file__), 'static', 'tmp')
@@ -28,16 +27,25 @@ line_bot_api = LineBotApi(os.getenv('CHANNEL_ACCESS_TOKEN'))
 handler = WebhookHandler(os.getenv('CHANNEL_SECRET'))
 
 # ===================================
-# UDN 運動新聞爬蟲設定（不用 Selenium）
+# UDN 運動新聞靜態爬蟲設定
 # ===================================
 URL = 'https://udn.com/news/cate/2/7227'  # 運動新聞
 BASE_URL = 'https://udn.com'
 
+# 每頁顯示幾則（按一次按鈕 = 一頁）
+PAGE_SIZE = 5
 
-def scrape_udn_latest(limit=5):
+# 紀錄每個聊天目前看到第幾頁
+# key: chat_id (user_id / group_id / room_id)
+# value: page (1 開始)
+news_page_state = {}
+
+
+def scrape_udn_latest():
     """
-    直接用 requests 拿分類頁 HTML，
-    回傳一個 list，裡面每筆是 {'標題':..., '連結':...}
+    靜態爬蟲：抓 UDN 運動新聞列表
+    回傳一個 list，每筆是 {'標題': ..., '連結': ...}
+    （不在這裡做分頁，一次抓多筆回來，後面再切 1-5、6-10）
     """
     headers = {
         "User-Agent": (
@@ -56,7 +64,7 @@ def scrape_udn_latest(limit=5):
 
     soup = BeautifulSoup(resp.text, 'html.parser')
 
-    # 這個選擇器延用你原本 Selenium 用的
+    # 延用你原本的選擇器
     news_elements = soup.select('div.story-list__text a')
 
     data = []
@@ -78,11 +86,26 @@ def scrape_udn_latest(limit=5):
             '連結': href,
         })
 
-        if len(data) >= limit:
-            break
-
-    print(f"[爬蟲] 共取得 {len(data)} 筆資料（已截到 {limit} 筆）")
+    print(f"[爬蟲] 共取得 {len(data)} 筆資料")
     return data
+
+
+def get_chat_id(event):
+    """
+    取得這個聊天的唯一 ID：
+    - 1:1 對話 → user_id
+    - 群組 → group_id
+    - 多人聊天室 → room_id
+    """
+    source = event.source
+    if isinstance(source, SourceUser):
+        return source.user_id
+    elif isinstance(source, SourceGroup):
+        return source.group_id
+    elif isinstance(source, SourceRoom):
+        return source.room_id
+    else:
+        return "unknown"
 
 
 # ==========================
@@ -132,8 +155,14 @@ def handle_postback(event):
     print(f"[Postback] data = {data}")
 
     if data == 'action=sports_news':
-        # 開始爬取最新文章（前 5 則）
-        news_list = scrape_udn_latest(limit=5)
+        chat_id = get_chat_id(event)
+
+        # 目前是第幾頁？（預設第 1 頁）
+        current_page = news_page_state.get(chat_id, 1)
+        print(f"[sports_news] chat_id={chat_id}, current_page={current_page}")
+
+        # 每次按按鈕都重新爬一次最新列表
+        news_list = scrape_udn_latest()
 
         if not news_list:
             line_bot_api.reply_message(
@@ -142,12 +171,31 @@ def handle_postback(event):
             )
             return
 
+        # 計算這一頁要顯示的範圍（1–5、6–10、11–15...）
+        start_idx = (current_page - 1) * PAGE_SIZE
+        end_idx = current_page * PAGE_SIZE
+        page_items = news_list[start_idx:end_idx]
+
+        if not page_items:
+            # 已經沒有更多新聞了，提示一下並把頁數重置回 1
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text='已經沒有更多最新新聞了，我幫你從第一頁重新開始喔！')
+            )
+            news_page_state[chat_id] = 1
+            return
+
         messages = []
-        for i, row in enumerate(news_list, start=1):
+        # 顯示實際是第幾則（用全體排序的編號）
+        for i, row in enumerate(page_items, start=start_idx + 1):
             text = f"{i}. {row['標題']}\n{row['連結']}"
             messages.append(TextSendMessage(text=text))
 
         line_bot_api.reply_message(event.reply_token, messages)
+
+        # 下一次按按鈕，就看下一頁
+        news_page_state[chat_id] = current_page + 1
+
     else:
         line_bot_api.reply_message(
             event.reply_token,
