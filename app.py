@@ -18,6 +18,11 @@ import requests
 from bs4 import BeautifulSoup
 # ====== 靜態爬蟲相關套件 ==========
 
+# ====== 文字雲相關套件 ==========
+from wordcloud import WordCloud
+import jieba
+# ====== 文字雲相關套件 ==========
+
 app = Flask(__name__)
 static_tmp_path = os.path.join(os.path.dirname(__file__), 'static', 'tmp')
 
@@ -39,6 +44,19 @@ PAGE_SIZE = 5
 # key: chat_id (user_id / group_id / room_id)
 # value: page (1 開始)
 news_page_state = {}
+
+# 給文字雲用的設定：字型 & 網址
+# 👉 字型路徑請換成你機器上支援中文的字型
+WORDCLOUD_FONT_PATH = os.getenv(
+    'WORDCLOUD_FONT_PATH',
+    '/System/Library/Fonts/STHeiti Light.ttc'  # Mac 範例，Windows / Linux 要自己改
+)
+
+# 👉 這個一定要改成你自己的 https 網址（ngrok / Heroku 等）
+BASE_STATIC_URL = os.getenv(
+    'BASE_STATIC_URL',
+    'https://your-domain.com'   # 請改成你的網域，例如：https://xxxx.ngrok.io
+)
 
 
 def scrape_udn_latest():
@@ -108,6 +126,43 @@ def get_chat_id(event):
         return "unknown"
 
 
+def generate_wordcloud_from_news():
+    """
+    爬運動新聞標題 -> jieba 斷詞 -> 產生文字雲圖片 -> 存到 static/tmp
+    回傳圖片的可公開 URL（給 LINE ImageSendMessage 用）
+    """
+    news_list = scrape_udn_latest()
+    if not news_list:
+        return None
+
+    # 把所有標題串在一起
+    all_titles = "。".join(item['標題'] for item in news_list)
+
+    # 用 jieba 做中文斷詞
+    words = jieba.cut(all_titles, cut_all=False)
+    wc_text = " ".join(words)
+
+    # 確保資料夾存在
+    os.makedirs(static_tmp_path, exist_ok=True)
+
+    # 產生文字雲
+    wc = WordCloud(
+        font_path=WORDCLOUD_FONT_PATH,  # 一定要支援中文
+        width=800,
+        height=600,
+        background_color="white"
+    ).generate(wc_text)
+
+    filename = 'sports_wordcloud.png'
+    filepath = os.path.join(static_tmp_path, filename)
+    wc.to_file(filepath)
+
+    # 組合成對外可存取的 URL
+    image_url = f"{BASE_STATIC_URL}/static/tmp/{filename}"
+    print(f"[wordcloud] image_url = {image_url}")
+    return image_url
+
+
 # ==========================
 # Flask / LINE Webhook
 # ==========================
@@ -124,10 +179,30 @@ def callback():
 
 
 # ==========================
-# 處理文字訊息（先跳出運動選項按鈕）
+# 處理文字訊息
 # ==========================
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text_message(event):
+    user_text = event.message.text.strip()
+
+    # ✅ 當使用者輸入：幫我生成文字雲
+    if user_text == "幫我生成文字雲":
+        image_url = generate_wordcloud_from_news()
+        if not image_url:
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text='目前無法取得新聞資料，無法生成文字雲，請稍後再試。')
+            )
+            return
+
+        image_message = ImageSendMessage(
+            original_content_url=image_url,
+            preview_image_url=image_url
+        )
+        line_bot_api.reply_message(event.reply_token, image_message)
+        return
+
+    # 其他文字 → 顯示功能選單
     buttons_template = TemplateSendMessage(
         alt_text='功能選單',
         template=ButtonsTemplate(
