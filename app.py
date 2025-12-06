@@ -10,6 +10,7 @@ from linebot.models import *
 
 # ====== python 的函數庫 ==========
 import os
+import time
 import traceback
 # ====== python 的函數庫 ==========
 
@@ -22,6 +23,7 @@ from bs4 import BeautifulSoup
 from wordcloud import WordCloud
 import jieba
 # ====== 文字雲相關套件 ==========
+
 
 app = Flask(__name__)
 static_tmp_path = os.path.join(os.path.dirname(__file__), 'static', 'tmp')
@@ -37,33 +39,26 @@ handler = WebhookHandler(os.getenv('CHANNEL_SECRET'))
 URL = 'https://udn.com/news/cate/2/7227'  # 運動新聞
 BASE_URL = 'https://udn.com'
 
-# 每頁顯示幾則（按一次按鈕 = 一頁）
+# 每次按按鈕顯示幾則
 PAGE_SIZE = 5
 
 # 紀錄每個聊天目前看到第幾頁
-# key: chat_id (user_id / group_id / room_id)
-# value: page (1 開始)
-news_page_state = {}
+news_page_state = {}   # {chat_id: page}
 
-# 給文字雲用的設定：字型 & 網址
-# 👉 字型路徑請換成你機器上支援中文的字型
+# 紀錄每個聊天「已看過的新聞標題」，給文字雲用
+seen_titles_state = {}  # {chat_id: [title1, title2, ...]}
+
+# 字型路徑（給中文文字雲用）——如果不存在就用預設字型
 WORDCLOUD_FONT_PATH = os.getenv(
     'WORDCLOUD_FONT_PATH',
-    '/System/Library/Fonts/STHeiti Light.ttc'  # Mac 範例，Windows / Linux 要自己改
-)
-
-# 👉 這個一定要改成你自己的 https 網址（ngrok / Heroku 等）
-BASE_STATIC_URL = os.getenv(
-    'BASE_STATIC_URL',
-    'https://your-domain.com'   # 請改成你的網域，例如：https://xxxx.ngrok.io
+    '/System/Library/Fonts/STHeiti Light.ttc'  # 這是 Mac 範例，Render 上通常會找不到，下面會幫你檢查
 )
 
 
 def scrape_udn_latest():
     """
     靜態爬蟲：抓 UDN 運動新聞列表
-    回傳一個 list，每筆是 {'標題': ..., '連結': ...}
-    （不在這裡做分頁，一次抓多筆回來，後面再切 1-5、6-10）
+    回傳 list，每筆是 {'標題': ..., '連結': ...}
     """
     headers = {
         "User-Agent": (
@@ -82,7 +77,6 @@ def scrape_udn_latest():
 
     soup = BeautifulSoup(resp.text, 'html.parser')
 
-    # 延用你原本的選擇器
     news_elements = soup.select('div.story-list__text a')
 
     data = []
@@ -126,40 +120,43 @@ def get_chat_id(event):
         return "unknown"
 
 
-def generate_wordcloud_from_news():
+def generate_wordcloud_for_chat(chat_id):
     """
-    爬運動新聞標題 -> jieba 斷詞 -> 產生文字雲圖片 -> 存到 static/tmp
-    回傳圖片的可公開 URL（給 LINE ImageSendMessage 用）
+    根據「這個 chat_id 已看過的新聞標題」產生文字雲，
+    把圖片存到 static/tmp/，回傳圖片 URL。
     """
-    news_list = scrape_udn_latest()
-    if not news_list:
+    titles = seen_titles_state.get(chat_id)
+    if not titles:
+        print(f"[wordcloud] chat_id={chat_id} 尚未有任何標題")
         return None
 
-    # 把所有標題串在一起
-    all_titles = "。".join(item['標題'] for item in news_list)
+    all_titles = "。".join(titles)
 
-    # 用 jieba 做中文斷詞
+    # jieba 斷詞
     words = jieba.cut(all_titles, cut_all=False)
     wc_text = " ".join(words)
 
-    # 確保資料夾存在
     os.makedirs(static_tmp_path, exist_ok=True)
 
-    # 產生文字雲
+    # 檢查字型路徑是否存在，不存在就不用 font_path（只是中文字可能變方塊，但不會當掉）
+    font_path = WORDCLOUD_FONT_PATH if WORDCLOUD_FONT_PATH and os.path.exists(WORDCLOUD_FONT_PATH) else None
+
     wc = WordCloud(
-        font_path=WORDCLOUD_FONT_PATH,  # 一定要支援中文
+        font_path=font_path,
         width=800,
         height=600,
         background_color="white"
     ).generate(wc_text)
 
-    filename = 'sports_wordcloud.png'
+    filename = f'sports_wordcloud_{chat_id}_{int(time.time())}.png'
     filepath = os.path.join(static_tmp_path, filename)
     wc.to_file(filepath)
 
-    # 組合成對外可存取的 URL
-    image_url = f"{BASE_STATIC_URL}/static/tmp/{filename}"
-    print(f"[wordcloud] image_url = {image_url}")
+    # 用 request.url_root 組出完整 URL，例如 https://xxx.onrender.com/static/tmp/xxx.png
+    base_url = request.url_root.rstrip('/')  # e.g. https://linebot-openai-test.onrender.com
+    image_url = f"{base_url}/static/tmp/{filename}"
+
+    print(f"[wordcloud] chat_id={chat_id}, image_url={image_url}")
     return image_url
 
 
@@ -184,14 +181,15 @@ def callback():
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text_message(event):
     user_text = event.message.text.strip()
+    chat_id = get_chat_id(event)
 
-    # ✅ 當使用者輸入：幫我生成文字雲
+    # ✅ 觸發文字雲
     if user_text == "幫我生成文字雲":
-        image_url = generate_wordcloud_from_news()
+        image_url = generate_wordcloud_for_chat(chat_id)
         if not image_url:
             line_bot_api.reply_message(
                 event.reply_token,
-                TextSendMessage(text='目前無法取得新聞資料，無法生成文字雲，請稍後再試。')
+                TextSendMessage(text='你目前還沒有看過任何運動新聞，請先點選「運動新聞」按鈕喔！')
             )
             return
 
@@ -258,7 +256,16 @@ def handle_postback(event):
                 TextSendMessage(text='已經沒有更多最新新聞了，我幫你從第一頁重新開始喔！')
             )
             news_page_state[chat_id] = 1
+            # 重置已看過的標題
+            seen_titles_state[chat_id] = []
             return
+
+        # 把這一頁的標題累積起來，給文字雲用
+        seen_list = seen_titles_state.get(chat_id, [])
+        for row in page_items:
+            seen_list.append(row['標題'])
+        seen_titles_state[chat_id] = seen_list
+        print(f"[sports_news] chat_id={chat_id}, 累積標題數={len(seen_list)}")
 
         messages = []
         # 顯示實際是第幾則（用全體排序的編號）
