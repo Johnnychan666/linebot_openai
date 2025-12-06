@@ -25,6 +25,14 @@ from wordcloud import WordCloud
 import jieba
 # ====== 文字雲相關套件 ==========
 
+# ====== 畫圖（詞頻柱狀圖）相關套件 ==========
+import matplotlib
+matplotlib.use('Agg')  # 伺服器無螢幕環境用這個 backend
+import matplotlib.pyplot as plt
+from matplotlib.font_manager import FontProperties
+from collections import Counter
+# ====== 畫圖相關套件 ==========
+
 
 app = Flask(__name__)
 static_tmp_path = os.path.join(os.path.dirname(__file__), 'static', 'tmp')
@@ -151,19 +159,21 @@ def get_chat_id(event):
 
 
 # ===================================
-# 文字雲產生
+# 文字雲 + 詞頻柱狀圖 產生
 # ===================================
 def generate_wordcloud_for_chat(chat_id, category_key=None):
     """
-    根據 chat_id 的已看過標題產生文字雲：
+    根據 chat_id 的已看過標題產生：
+    - 詞頻 Top N 柱狀圖
+    - 文字雲
     - category_key = None → 全部類別合併
     - category_key = 'sports' / 'global' / ... → 指定類別
-    回傳圖片 URL，若無資料則回傳 None
+    回傳 (freq_image_url, wordcloud_image_url)，若無資料則回傳 (None, None)
     """
     chat_seen = seen_titles_state.get(chat_id)
     if not chat_seen:
         print(f"[wordcloud] chat_id={chat_id} 尚未有任何標題")
-        return None
+        return (None, None)
 
     titles = []
 
@@ -181,19 +191,59 @@ def generate_wordcloud_for_chat(chat_id, category_key=None):
 
     if not titles:
         print(f"[wordcloud] chat_id={chat_id}, category={category_key} 沒有標題可用")
-        return None
+        return (None, None)
 
     if not os.path.exists(WORDCLOUD_FONT_PATH):
         print(f"[wordcloud] 字型檔不存在: {WORDCLOUD_FONT_PATH}")
-        return None
+        return (None, None)
 
+    # ====== 準備資料：斷詞 ======
     all_titles = "。".join(titles)
+    words = list(jieba.cut(all_titles, cut_all=False))
 
-    # jieba 斷詞
-    words = jieba.cut(all_titles, cut_all=False)
-    wc_text = " ".join(words)
+    # 去掉太短或空白的詞
+    clean_words = [w.strip() for w in words if len(w.strip()) >= 2]
 
     os.makedirs(static_tmp_path, exist_ok=True)
+
+    # ====== 產生詞頻柱狀圖 ======
+    freq_image_url = None
+    if clean_words:
+        counter = Counter(clean_words)
+        top_n = 15
+        most_common = counter.most_common(top_n)
+
+        labels, counts = zip(*most_common)
+
+        font_prop = FontProperties(fname=WORDCLOUD_FONT_PATH)
+
+        plt.figure(figsize=(8, 6))
+        y_pos = range(len(labels))
+        plt.barh(y_pos, counts)
+        plt.yticks(y_pos, labels, fontproperties=font_prop)
+        plt.xlabel('詞頻', fontproperties=font_prop)
+        plt.title('熱門關鍵詞', fontproperties=font_prop)
+        plt.gca().invert_yaxis()  # 讓最高的在最上面
+        plt.tight_layout()
+
+        freq_filename = f'freq_{chat_id}'
+        if category_key:
+            freq_filename += f'_{category_key}'
+        freq_filename += f'_{int(time.time())}.png'
+
+        freq_filepath = os.path.join(static_tmp_path, freq_filename)
+        plt.savefig(freq_filepath)
+        plt.close()
+
+        base_url = request.url_root.rstrip('/')
+        freq_image_url = f"{base_url}/static/tmp/{freq_filename}"
+
+        print(f"[freq] chat_id={chat_id}, category={category_key}, image_url={freq_image_url}")
+    else:
+        print(f"[freq] chat_id={chat_id}, category={category_key} 無足夠詞彙產生柱狀圖")
+
+    # ====== 產生文字雲 ======
+    wc_text = " ".join(clean_words) if clean_words else " ".join(words)
 
     wc = WordCloud(
         font_path=WORDCLOUD_FONT_PATH,  # 使用專案內的 msjh.ttc（繁體中文）
@@ -202,20 +252,19 @@ def generate_wordcloud_for_chat(chat_id, category_key=None):
         background_color="white"
     ).generate(wc_text)
 
-    filename = f'wordcloud_{chat_id}'
+    wc_filename = f'wordcloud_{chat_id}'
     if category_key:
-        filename += f'_{category_key}'
-    filename += f'_{int(time.time())}.png'
+        wc_filename += f'_{category_key}'
+    wc_filename += f'_{int(time.time())}.png'
 
-    filepath = os.path.join(static_tmp_path, filename)
-    wc.to_file(filepath)
+    wc_filepath = os.path.join(static_tmp_path, wc_filename)
+    wc.to_file(wc_filepath)
 
-    # 用 request.url_root 組出完整 URL，例如 https://xxx.onrender.com/static/tmp/xxx.png
     base_url = request.url_root.rstrip('/')  # e.g. https://xxx.onrender.com
-    image_url = f"{base_url}/static/tmp/{filename}"
+    wc_image_url = f"{base_url}/static/tmp/{wc_filename}"
 
-    print(f"[wordcloud] chat_id={chat_id}, category={category_key}, image_url={image_url}")
-    return image_url
+    print(f"[wordcloud] chat_id={chat_id}, category={category_key}, image_url={wc_image_url}")
+    return (freq_image_url, wc_image_url)
 
 
 # ==========================
@@ -258,7 +307,7 @@ def handle_text_message(event):
             elif "產經" in user_text or "產業" in user_text:
                 category_key = 'econ'
 
-            image_url = generate_wordcloud_for_chat(chat_id, category_key)
+            freq_url, image_url = generate_wordcloud_for_chat(chat_id, category_key)
 
             if not image_url:
                 if category_key:
@@ -272,11 +321,24 @@ def handle_text_message(event):
                 )
                 return
 
-            image_message = ImageSendMessage(
-                original_content_url=image_url,
-                preview_image_url=image_url
+            messages = []
+            # 先丟詞頻柱狀圖
+            if freq_url:
+                messages.append(
+                    ImageSendMessage(
+                        original_content_url=freq_url,
+                        preview_image_url=freq_url
+                    )
+                )
+            # 再丟文字雲
+            messages.append(
+                ImageSendMessage(
+                    original_content_url=image_url,
+                    preview_image_url=image_url
+                )
             )
-            line_bot_api.reply_message(event.reply_token, image_message)
+
+            line_bot_api.reply_message(event.reply_token, messages)
             return
 
         # === 其他文字 → 顯示「一個泡泡 + 5 個 Quick Reply 按鈕」 ===
