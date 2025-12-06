@@ -48,11 +48,8 @@ news_page_state = {}   # {chat_id: page}
 # 紀錄每個聊天「已看過的新聞標題」，給文字雲用
 seen_titles_state = {}  # {chat_id: [title1, title2, ...]}
 
-# 字型路徑（給中文文字雲用）——如果不存在就用預設字型
-WORDCLOUD_FONT_PATH = os.getenv(
-    'WORDCLOUD_FONT_PATH',
-    '/System/Library/Fonts/STHeiti Light.ttc'  # 這是 Mac 範例，Render 上通常會找不到，下面會幫你檢查
-)
+# 使用專案根目錄的 msjh.ttc（微軟正黑體）
+WORDCLOUD_FONT_PATH = os.path.join(os.path.dirname(__file__), 'msjh.ttc')
 
 
 def scrape_udn_latest():
@@ -130,6 +127,11 @@ def generate_wordcloud_for_chat(chat_id):
         print(f"[wordcloud] chat_id={chat_id} 尚未有任何標題")
         return None
 
+    if not os.path.exists(WORDCLOUD_FONT_PATH):
+        # 如果字型沒被找到，直接印錯並返回 None（避免框框）
+        print(f"[wordcloud] 字型檔不存在: {WORDCLOUD_FONT_PATH}")
+        return None
+
     all_titles = "。".join(titles)
 
     # jieba 斷詞
@@ -138,11 +140,8 @@ def generate_wordcloud_for_chat(chat_id):
 
     os.makedirs(static_tmp_path, exist_ok=True)
 
-    # 檢查字型路徑是否存在，不存在就不用 font_path（只是中文字可能變方塊，但不會當掉）
-    font_path = WORDCLOUD_FONT_PATH if WORDCLOUD_FONT_PATH and os.path.exists(WORDCLOUD_FONT_PATH) else None
-
     wc = WordCloud(
-        font_path=font_path,
+        font_path=WORDCLOUD_FONT_PATH,  # 使用專案內的 msjh.ttc（繁體中文）
         width=800,
         height=600,
         background_color="white"
@@ -189,7 +188,7 @@ def handle_text_message(event):
         if not image_url:
             line_bot_api.reply_message(
                 event.reply_token,
-                TextSendMessage(text='你目前還沒有看過任何運動新聞，請先點選「運動新聞」按鈕喔！')
+                TextSendMessage(text='目前沒有可用的新聞標題，或文字雲字型檔未正確設定，請先多看幾則運動新聞再試一次喔！')
             )
             return
 
@@ -250,13 +249,12 @@ def handle_postback(event):
         page_items = news_list[start_idx:end_idx]
 
         if not page_items:
-            # 已經沒有更多新聞了，提示一下並把頁數重置回 1
+            # 已經沒有更多新聞了，提示一下並把頁數重置回 1，並清空已看標題
             line_bot_api.reply_message(
                 event.reply_token,
                 TextSendMessage(text='已經沒有更多最新新聞了，我幫你從第一頁重新開始喔！')
             )
             news_page_state[chat_id] = 1
-            # 重置已看過的標題
             seen_titles_state[chat_id] = []
             return
 
