@@ -279,53 +279,49 @@ def handle_text_message(event):
             line_bot_api.reply_message(event.reply_token, image_message)
             return
 
-        # === 其他文字 → 顯示五個類別的新聞選單（兩個 ButtonsTemplate） ===
-        buttons1 = TemplateSendMessage(
-            alt_text='新聞類別選單 1',
-            template=ButtonsTemplate(
-                title='新聞類別選單 (1/2)',
-                text='請選擇想看的新聞類別',
-                actions=[
-                    PostbackAction(
+        # === 其他文字 → 顯示「一個泡泡 + 5 個 Quick Reply 按鈕」 ===
+        msg = TextSendMessage(
+            text='請選擇想看的新聞類別',
+            quick_reply=QuickReply(items=[
+                QuickReplyButton(
+                    action=PostbackAction(
                         label='運動新聞',
                         display_text='我要看運動新聞',
                         data='action=news&cat=sports'
-                    ),
-                    PostbackAction(
+                    )
+                ),
+                QuickReplyButton(
+                    action=PostbackAction(
                         label='全球新聞',
                         display_text='我要看全球新聞',
                         data='action=news&cat=global'
-                    ),
-                    PostbackAction(
+                    )
+                ),
+                QuickReplyButton(
+                    action=PostbackAction(
                         label='股市新聞',
                         display_text='我要看股市新聞',
                         data='action=news&cat=stock'
-                    ),
-                    PostbackAction(
+                    )
+                ),
+                QuickReplyButton(
+                    action=PostbackAction(
                         label='社會新聞',
                         display_text='我要看社會新聞',
                         data='action=news&cat=social'
-                    ),
-                ]
-            )
-        )
-
-        buttons2 = TemplateSendMessage(
-            alt_text='新聞類別選單 2',
-            template=ButtonsTemplate(
-                title='新聞類別選單 (2/2)',
-                text='請選擇想看的新聞類別',
-                actions=[
-                    PostbackAction(
+                    )
+                ),
+                QuickReplyButton(
+                    action=PostbackAction(
                         label='產經新聞',
                         display_text='我要看產經新聞',
                         data='action=news&cat=econ'
                     )
-                ]
-            )
+                ),
+            ])
         )
 
-        line_bot_api.reply_message(event.reply_token, [buttons1, buttons2])
+        line_bot_api.reply_message(event.reply_token, msg)
 
     except Exception as e:
         print("[handle_text_message] error:", traceback.format_exc())
@@ -411,13 +407,18 @@ def handle_postback(event):
                 f"累積全部標題數={len(all_list)}, 該類別標題數={len(cat_list)}"
             )
 
-            messages = []
-            # 顯示實際是第幾則（用全體排序的編號）
+            # === 將本頁 5 則新聞組成「一個文字框」 ===
+            lines = []
             for i, row in enumerate(page_items, start=start_idx + 1):
-                text = f"{cname}新聞 第{i} 則\n{row['標題']}\n{row['連結']}"
-                messages.append(TextSendMessage(text=text))
+                block = f"{cname}新聞 第{i} 則\n{row['標題']}\n{row['連結']}"
+                lines.append(block)
 
-            line_bot_api.reply_message(event.reply_token, messages)
+            reply_text = "\n\n".join(lines)  # 每則新聞之間空一行
+
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text=reply_text)
+            )
 
             # 下一次按按鈕，就看下一頁
             chat_state[category_key] = current_page + 1
