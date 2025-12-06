@@ -12,6 +12,7 @@ from linebot.models import *
 import os
 import time
 import traceback
+from urllib.parse import parse_qs
 # ====== python 的函數庫 ==========
 
 # ====== 靜態爬蟲相關套件 ==========
@@ -34,29 +35,62 @@ line_bot_api = LineBotApi(os.getenv('CHANNEL_ACCESS_TOKEN'))
 handler = WebhookHandler(os.getenv('CHANNEL_SECRET'))
 
 # ===================================
-# UDN 運動新聞靜態爬蟲設定
+# UDN 各類新聞靜態爬蟲設定
 # ===================================
-URL = 'https://udn.com/news/cate/2/7227'  # 運動新聞
 BASE_URL = 'https://udn.com'
+
+# 五個類別設定
+CATEGORIES = {
+    'sports': {
+        'name': '運動',
+        'url': 'https://udn.com/news/cate/2/7227'
+    },
+    'global': {
+        'name': '全球',
+        'url': 'https://udn.com/news/cate/2/7225'
+    },
+    'stock': {
+        'name': '股市',
+        'url': 'https://udn.com/news/cate/2/6645'
+    },
+    'social': {
+        'name': '社會',
+        'url': 'https://udn.com/news/cate/2/6639'
+    },
+    'econ': {
+        'name': '產經',
+        'url': 'https://udn.com/news/cate/2/6644'
+    },
+}
 
 # 每次按按鈕顯示幾則
 PAGE_SIZE = 5
 
-# 紀錄每個聊天目前看到第幾頁
-news_page_state = {}   # {chat_id: page}
+# 紀錄每個聊天、每個類別目前看到第幾頁
+# 結構：{ chat_id: { category_key: page_int } }
+news_page_state = {}
 
-# 紀錄每個聊天「已看過的新聞標題」，給文字雲用
-seen_titles_state = {}  # {chat_id: [title1, title2, ...]}
+# 紀錄每個聊天、每個類別「已看過的標題」，給文字雲用
+# 結構：{ chat_id: { 'all': [...], 'sports': [...], 'global': [...], ... } }
+seen_titles_state = {}
 
 # 使用專案根目錄的 msjh.ttc（微軟正黑體）
 WORDCLOUD_FONT_PATH = os.path.join(os.path.dirname(__file__), 'msjh.ttc')
 
 
-def scrape_udn_latest():
+# ===================================
+# 爬蟲：抓指定類別的新聞列表
+# ===================================
+def scrape_udn_category(category_key):
     """
-    靜態爬蟲：抓 UDN 運動新聞列表
+    靜態爬蟲：抓 UDN 指定類別新聞列表
     回傳 list，每筆是 {'標題': ..., '連結': ...}
     """
+    if category_key not in CATEGORIES:
+        return []
+
+    url = CATEGORIES[category_key]['url']
+
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -66,10 +100,10 @@ def scrape_udn_latest():
     }
 
     try:
-        resp = requests.get(URL, headers=headers, timeout=10)
+        resp = requests.get(url, headers=headers, timeout=10)
         resp.raise_for_status()
     except Exception as e:
-        print("❌ 取得 UDN 頁面失敗：", e)
+        print(f"❌ 取得 UDN {category_key} 頁面失敗：", e)
         return []
 
     soup = BeautifulSoup(resp.text, 'html.parser')
@@ -95,7 +129,7 @@ def scrape_udn_latest():
             '連結': href,
         })
 
-    print(f"[爬蟲] 共取得 {len(data)} 筆資料")
+    print(f"[爬蟲] {category_key} 共取得 {len(data)} 筆資料")
     return data
 
 
@@ -117,18 +151,43 @@ def get_chat_id(event):
         return "unknown"
 
 
-def generate_wordcloud_for_chat(chat_id):
+# ===================================
+# 文字雲產生
+# ===================================
+def generate_wordcloud_for_chat(chat_id, category_key=None):
     """
-    根據「這個 chat_id 已看過的新聞標題」產生文字雲，
-    把圖片存到 static/tmp/，回傳圖片 URL。
+    根據 chat_id 的已看過標題產生文字雲：
+    - category_key = None → 全部類別合併
+    - category_key = 'sports' / 'global' / ... → 指定類別
+    回傳圖片 URL，若無資料則回傳 None
     """
-    titles = seen_titles_state.get(chat_id)
-    if not titles:
+    chat_seen = seen_titles_state.get(chat_id)
+    if not chat_seen:
         print(f"[wordcloud] chat_id={chat_id} 尚未有任何標題")
         return None
 
+    titles = []
+
+    if category_key:
+        # 指定類別
+        titles = chat_seen.get(category_key, [])
+    else:
+        # 全部類別合併（排除 key='all' 時避免重複）
+        for key, arr in chat_seen.items():
+            # 如果有 'all'，就直接用 all；否則把各類別加總
+            if key == 'all':
+                titles = arr
+                break
+        else:
+            # 沒有 all，就把各類別加總
+            for key, arr in chat_seen.items():
+                titles.extend(arr)
+
+    if not titles:
+        print(f"[wordcloud] chat_id={chat_id}, category={category_key} 沒有標題可用")
+        return None
+
     if not os.path.exists(WORDCLOUD_FONT_PATH):
-        # 如果字型沒被找到，直接印錯並返回 None（避免框框）
         print(f"[wordcloud] 字型檔不存在: {WORDCLOUD_FONT_PATH}")
         return None
 
@@ -147,7 +206,11 @@ def generate_wordcloud_for_chat(chat_id):
         background_color="white"
     ).generate(wc_text)
 
-    filename = f'sports_wordcloud_{chat_id}_{int(time.time())}.png'
+    filename = f'sports_wordcloud_{chat_id}'
+    if category_key:
+        filename += f'_{category_key}'
+    filename += f'_{int(time.time())}.png'
+
     filepath = os.path.join(static_tmp_path, filename)
     wc.to_file(filepath)
 
@@ -155,7 +218,7 @@ def generate_wordcloud_for_chat(chat_id):
     base_url = request.url_root.rstrip('/')  # e.g. https://linebot-openai-test.onrender.com
     image_url = f"{base_url}/static/tmp/{filename}"
 
-    print(f"[wordcloud] chat_id={chat_id}, image_url={image_url}")
+    print(f"[wordcloud] chat_id={chat_id}, category={category_key}, image_url={image_url}")
     return image_url
 
 
@@ -182,13 +245,33 @@ def handle_text_message(event):
     user_text = event.message.text.strip()
     chat_id = get_chat_id(event)
 
-    # ✅ 觸發文字雲
-    if user_text == "幫我生成文字雲":
-        image_url = generate_wordcloud_for_chat(chat_id)
+    # === 文字雲相關指令 ===
+    if "文字雲" in user_text:
+        category_key = None
+
+        # 判斷是不是要某一類的文字雲
+        if "運動" in user_text:
+            category_key = 'sports'
+        elif "全球" in user_text:
+            category_key = 'global'
+        elif "股市" in user_text:
+            category_key = 'stock'
+        elif "社會" in user_text:
+            category_key = 'social'
+        elif "產經" in user_text or "產業" in user_text:
+            category_key = 'econ'
+
+        image_url = generate_wordcloud_for_chat(chat_id, category_key)
+
         if not image_url:
+            if category_key:
+                cname = CATEGORIES[category_key]['name']
+                msg = f'目前還沒有任何「{cname}新聞」的標題可以做文字雲，請先多看幾則 {cname} 新聞喔！'
+            else:
+                msg = '你目前還沒有看過任何新聞（或尚未累積足夠標題），請先點選各類別新聞按鈕喔！'
             line_bot_api.reply_message(
                 event.reply_token,
-                TextSendMessage(text='目前沒有可用的新聞標題，或文字雲字型檔未正確設定，請先多看幾則運動新聞再試一次喔！')
+                TextSendMessage(text=msg)
             )
             return
 
@@ -199,47 +282,88 @@ def handle_text_message(event):
         line_bot_api.reply_message(event.reply_token, image_message)
         return
 
-    # 其他文字 → 顯示功能選單
-    buttons_template = TemplateSendMessage(
-        alt_text='功能選單',
-        template=ButtonsTemplate(
-            title='功能選單',
-            text='請選擇想使用的服務',
-            actions=[
-                PostbackAction(
-                    label='運動新聞',
-                    display_text='我要看運動新聞',
-                    data='action=sports_news'
-                )
-            ]
-        )
+    # === 其他文字 → 顯示五個類別的新聞選單（CarouselTemplate） ===
+    carousel_template = TemplateSendMessage(
+        alt_text='新聞類別選單',
+        template=CarouselTemplate(columns=[
+            CarouselColumn(
+                title='新聞類別 (1/2)',
+                text='請選擇想看的新聞類別',
+                actions=[
+                    PostbackAction(
+                        label='運動新聞',
+                        display_text='我要看運動新聞',
+                        data='action=news&cat=sports'
+                    ),
+                    PostbackAction(
+                        label='全球新聞',
+                        display_text='我要看全球新聞',
+                        data='action=news&cat=global'
+                    ),
+                    PostbackAction(
+                        label='股市新聞',
+                        display_text='我要看股市新聞',
+                        data='action=news&cat=stock'
+                    ),
+                ]
+            ),
+            CarouselColumn(
+                title='新聞類別 (2/2)',
+                text='請選擇想看的新聞類別',
+                actions=[
+                    PostbackAction(
+                        label='社會新聞',
+                        display_text='我要看社會新聞',
+                        data='action=news&cat=social'
+                    ),
+                    PostbackAction(
+                        label='產經新聞',
+                        display_text='我要看產經新聞',
+                        data='action=news&cat=econ'
+                    ),
+                ]
+            )
+        ])
     )
 
-    line_bot_api.reply_message(event.reply_token, buttons_template)
+    line_bot_api.reply_message(event.reply_token, carousel_template)
 
 
 # ==========================
-# 處理 Postback（按下運動新聞按鈕）
+# 處理 Postback（按下各類新聞按鈕）
 # ==========================
 @handler.add(PostbackEvent)
 def handle_postback(event):
     data = event.postback.data
-    print(f"[Postback] data = {data}")
+    print(f"[Postback] raw data = {data}")
 
-    if data == 'action=sports_news':
-        chat_id = get_chat_id(event)
+    params = parse_qs(data)
+    action = params.get('action', [''])[0]
+    chat_id = get_chat_id(event)
 
-        # 目前是第幾頁？（預設第 1 頁）
-        current_page = news_page_state.get(chat_id, 1)
-        print(f"[sports_news] chat_id={chat_id}, current_page={current_page}")
+    if action == 'news':
+        category_key = params.get('cat', [''])[0]
+        if category_key not in CATEGORIES:
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text='未知的新聞類別，請重新選擇。')
+            )
+            return
+
+        cname = CATEGORIES[category_key]['name']
+
+        # 取得目前這個聊天室、這個類別是第幾頁（預設第 1 頁）
+        chat_state = news_page_state.get(chat_id, {})
+        current_page = chat_state.get(category_key, 1)
+        print(f"[news] chat_id={chat_id}, category={category_key}, current_page={current_page}")
 
         # 每次按按鈕都重新爬一次最新列表
-        news_list = scrape_udn_latest()
+        news_list = scrape_udn_category(category_key)
 
         if not news_list:
             line_bot_api.reply_message(
                 event.reply_token,
-                TextSendMessage(text='目前無法取得運動新聞，請稍後再試。')
+                TextSendMessage(text=f'目前無法取得{cname}新聞，請稍後再試。')
             )
             return
 
@@ -249,32 +373,45 @@ def handle_postback(event):
         page_items = news_list[start_idx:end_idx]
 
         if not page_items:
-            # 已經沒有更多新聞了，提示一下並把頁數重置回 1，並清空已看標題
+            # 已經沒有更多新聞了，提示一下並把該類別頁數重置回 1，並清空該類別已看標題
             line_bot_api.reply_message(
                 event.reply_token,
-                TextSendMessage(text='已經沒有更多最新新聞了，我幫你從第一頁重新開始喔！')
+                TextSendMessage(text=f'{cname}新聞已經沒有更多最新內容了，我幫你從第一頁重新開始喔！')
             )
-            news_page_state[chat_id] = 1
-            seen_titles_state[chat_id] = []
+            chat_state[category_key] = 1
+            news_page_state[chat_id] = chat_state
+            # 清掉這個聊天室目前所有已看標題（讓文字雲重新累積）
+            seen_titles_state[chat_id] = {}
             return
 
         # 把這一頁的標題累積起來，給文字雲用
-        seen_list = seen_titles_state.get(chat_id, [])
+        chat_seen = seen_titles_state.get(chat_id, {})
+        # all 類別（全部新聞）
+        all_list = chat_seen.get('all', [])
+        # 單一類別
+        cat_list = chat_seen.get(category_key, [])
+
         for row in page_items:
-            seen_list.append(row['標題'])
-        seen_titles_state[chat_id] = seen_list
-        print(f"[sports_news] chat_id={chat_id}, 累積標題數={len(seen_list)}")
+            all_list.append(row['標題'])
+            cat_list.append(row['標題'])
+
+        chat_seen['all'] = all_list
+        chat_seen[category_key] = cat_list
+        seen_titles_state[chat_id] = chat_seen
+
+        print(f"[news] chat_id={chat_id}, category={category_key}, 累積全部標題數={len(all_list)}, 該類別標題數={len(cat_list)}")
 
         messages = []
         # 顯示實際是第幾則（用全體排序的編號）
         for i, row in enumerate(page_items, start=start_idx + 1):
-            text = f"{i}. {row['標題']}\n{row['連結']}"
+            text = f"{cname}新聞 第{i} 則\n{row['標題']}\n{row['連結']}"
             messages.append(TextSendMessage(text=text))
 
         line_bot_api.reply_message(event.reply_token, messages)
 
         # 下一次按按鈕，就看下一頁
-        news_page_state[chat_id] = current_page + 1
+        chat_state[category_key] = current_page + 1
+        news_page_state[chat_id] = chat_state
 
     else:
         line_bot_api.reply_message(
