@@ -1,6 +1,5 @@
 line-bot-sdk
 flask
 gunicorn
-selenium
 beautifulsoup4
-
+requests
