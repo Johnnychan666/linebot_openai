@@ -22,14 +22,14 @@ import requests
 from bs4 import BeautifulSoup
 # ====== 靜態爬蟲相關套件 ==========
 
-# ====== 文字雲 / 圖表相關套件 ======
+# ====== 文字雲 / 圖表相關套件 ==========
 from wordcloud import WordCloud
 import jieba
 import matplotlib
 matplotlib.use("Agg")  # 無 GUI 環境用
 import matplotlib.pyplot as plt
 from matplotlib.font_manager import FontProperties
-# ====== 文字雲 / 圖表相關套件 ======
+# ====== 文字雲 / 圖表相關套件 ==========
 
 
 app = Flask(__name__)
@@ -68,6 +68,15 @@ CATEGORIES = {
     },
 }
 
+# 類別關鍵字（給文字判斷用）
+CATEGORY_ALIASES = {
+    'sports': ['運動'],
+    'global': ['全球', '國際'],
+    'stock': ['股市', '股票', '股價'],
+    'social': ['社會'],
+    'econ': ['產經', '財經', '經濟'],
+}
+
 # 每次按按鈕顯示幾則
 PAGE_SIZE = 5
 
@@ -75,9 +84,13 @@ PAGE_SIZE = 5
 # 結構：{ chat_id: { category_key: page_int } }
 news_page_state = {}
 
-# 紀錄每個聊天、每個類別「已看過的標題」，給文字雲 / 情緒分析 / 摘要用
-# 結構：{ chat_id: { 'all': [...], 'sports': [...], 'global': [...], ... } }
+# 紀錄每個聊天、每個類別「已看過的標題」，給文字雲 / 情緒分析用
+# 結構：{ chat_id: { 'sports': [...], 'global': [...], ... } }
 seen_titles_state = {}
+
+# 紀錄每個聊天最近一次抓到的完整新聞列表（給摘要用）
+# 結構：{ chat_id: { category_key: [ {標題, 連結}, ... ] } }
+last_news_cache = {}
 
 # 使用專案根目錄的 msjh.ttc（微軟正黑體）
 WORDCLOUD_FONT_PATH = os.path.join(os.path.dirname(__file__), 'msjh.ttc')
@@ -90,18 +103,6 @@ POSITIVE_WORDS = [
 NEGATIVE_WORDS = [
     "下跌", "重挫", "暴跌", "虧損", "災", "意外", "火警", "颱風", "地震", "暴雨",
     "死亡", "罹難", "警告", "風險", "衰退", "負成長", "爆炸", "暴力", "侵害", "詐騙"
-]
-
-# ====== 摘要觸發關鍵字（可自由問法） ======
-SUMMARY_TRIGGERS = [
-    "摘要", "重點", "大綱", "簡述", "簡介", "簡要說明",
-    "講什麼", "說什麼", "在講什麼", "在說什麼",
-    "大概在講什麼", "大概內容", "內容大意", "summary"
-]
-
-# ====== 感謝關鍵字 ======
-THANK_TRIGGERS = [
-    "謝謝", "感謝", "感恩", "thanks", "thank you", "thx"
 ]
 
 
@@ -134,7 +135,6 @@ def scrape_udn_category(category_key):
         return []
 
     soup = BeautifulSoup(resp.text, 'html.parser')
-
     news_elements = soup.select('div.story-list__text a')
 
     data = []
@@ -179,6 +179,79 @@ def get_chat_id(event):
 
 
 # ===================================
+# 類別 / 重置關鍵字解析
+# ===================================
+def detect_categories_from_text(norm_text):
+    """從字串裡找出提到哪些新聞類別，回傳 list of category_key"""
+    matched = []
+    for key, aliases in CATEGORY_ALIASES.items():
+        for a in aliases:
+            if a in norm_text:
+                matched.append(key)
+                break
+    return matched
+
+
+def detect_reset_target(norm_text):
+    """
+    判斷是否是「重置指令」
+    回傳：
+      - 'all'      → 清空全部
+      - category_key → 清空單一類別
+      - None       → 不是重置指令
+    """
+    has_reset_word = any(w in norm_text for w in ["重新", "重抓", "重來", "重跑", "從頭", "清空"])
+    if not has_reset_word:
+        return None
+
+    cats = detect_categories_from_text(norm_text)
+    if cats:
+        # 有重置字 + 類別字 → 重置該類
+        return cats[0]
+
+    # 沒有類別字，看看是不是「全部」相關
+    if "全部" in norm_text or "全都" in norm_text or "清空紀錄" in norm_text or "清空記錄" in norm_text:
+        return "all"
+
+    # 只說「清空紀錄」也當作全部
+    if "清空紀錄" in norm_text or "清空記錄" in norm_text:
+        return "all"
+
+    return None
+
+
+def reset_category_for_chat(chat_id, category_key):
+    """只重置某一個類別的頁數 & 標題 & 快取"""
+    # page
+    chat_pages = news_page_state.get(chat_id, {})
+    if category_key in chat_pages:
+        del chat_pages[category_key]
+    news_page_state[chat_id] = chat_pages
+
+    # seen titles
+    chat_seen = seen_titles_state.get(chat_id, {})
+    if category_key in chat_seen:
+        del chat_seen[category_key]
+    seen_titles_state[chat_id] = chat_seen
+
+    # cache for summary
+    chat_cache = last_news_cache.get(chat_id, {})
+    if category_key in chat_cache:
+        del chat_cache[category_key]
+    last_news_cache[chat_id] = chat_cache
+
+    print(f"[reset] chat_id={chat_id}, category={category_key} 已重置")
+
+
+def reset_all_for_chat(chat_id):
+    """把這個聊天室的所有類別狀態都清空"""
+    news_page_state.pop(chat_id, None)
+    seen_titles_state.pop(chat_id, None)
+    last_news_cache.pop(chat_id, None)
+    print(f"[reset] chat_id={chat_id} 全部類別已清空")
+
+
+# ===================================
 # Quick Reply 建立函式
 # ===================================
 def build_category_quick_reply(action_type="news"):
@@ -186,7 +259,7 @@ def build_category_quick_reply(action_type="news"):
     建立五個類別的 QuickReply：
     action_type:
       - "news"      → 看新聞
-      - "sentiment" → 情緒分析
+      - "sentiment" → 情緒分析（目前保留，文字版也可以叫）
     """
     return QuickReply(items=[
         QuickReplyButton(
@@ -248,11 +321,9 @@ def generate_wordcloud_for_chat(chat_id, category_key=None):
     if category_key:
         titles = chat_seen.get(category_key, [])
     else:
-        if 'all' in chat_seen:
-            titles = chat_seen['all']
-        else:
-            for _, arr in chat_seen.items():
-                titles.extend(arr)
+        # 全部類別合併
+        for key in CATEGORIES.keys():
+            titles.extend(chat_seen.get(key, []))
 
     if not titles:
         print(f"[wordcloud] chat_id={chat_id}, category={category_key} 沒有標題可用")
@@ -262,11 +333,8 @@ def generate_wordcloud_for_chat(chat_id, category_key=None):
         print(f"[wordcloud] 字型檔不存在: {WORDCLOUD_FONT_PATH}")
         return (None, None)
 
-    # ====== 準備資料：斷詞 ======
     all_titles = "。".join(titles)
     words = list(jieba.cut(all_titles, cut_all=False))
-
-    # 去掉太短或空白的詞
     clean_words = [w.strip() for w in words if len(w.strip()) >= 2]
 
     os.makedirs(static_tmp_path, exist_ok=True)
@@ -338,7 +406,7 @@ def generate_wordcloud_for_chat(chat_id, category_key=None):
 def analyze_sentiment_for_chat(chat_id, category_key):
     """
     對某個聊天室 + 類別已累積的標題做簡單情緒分析
-    回傳 (total, pos, neg, neu, overall_label) or None
+    回傳 (total, pos, neg, neu, label) or None
     """
     chat_seen = seen_titles_state.get(chat_id)
     if not chat_seen:
@@ -370,7 +438,10 @@ def analyze_sentiment_for_chat(chat_id, category_key):
     if total == 0:
         return None
 
-    if pos > neg:
+    # 粗略標籤
+    if pos > 0 and neg > 0 and abs(pos - neg) <= 1:
+        label = "整體「雙極化」😵"
+    elif pos > neg:
         label = "整體偏「正向」🙂"
     elif neg > pos:
         label = "整體偏「負向」☹️"
@@ -380,199 +451,114 @@ def analyze_sentiment_for_chat(chat_id, category_key):
     return (total, pos, neg, neu, label)
 
 
-# ===================================
-# 摘要相關工具：中文數字 & index 解析
-# ===================================
-def chinese_numeral_to_int(s: str):
+def analyze_all_sentiments_for_chat(chat_id):
     """
-    只處理 1~99 的簡單中文數字：一二三四五六七八九十、兩、零
-    例如：'三' -> 3, '十' -> 10, '十三' -> 13, '三十' -> 30, '三十五' -> 35
+    對目前有資料的各類別做情緒分析，回傳 dict:
+      { category_key: (total, pos, neg, neu, label), ... }
     """
-    digit_map = {
-        "零": 0, "〇": 0,
-        "一": 1, "二": 2, "兩": 2, "三": 3, "四": 4,
-        "五": 5, "六": 6, "七": 7, "八": 8, "九": 9
-    }
-
-    s = s.strip()
-    if not s:
+    results = {}
+    for key in CATEGORIES.keys():
+        r = analyze_sentiment_for_chat(chat_id, key)
+        if r:
+            results[key] = r
+    if not results:
         return None
-
-    # 單獨「十」
-    if s == "十":
-        return 10
-
-    # 有「十」的情況
-    if "十" in s:
-        parts = s.split("十")
-        # '十X' → 10 + X
-        if parts[0] == "":
-            tens = 1
-        else:
-            tens = digit_map.get(parts[0], 0)
-
-        ones = 0
-        if len(parts) > 1 and parts[1] != "":
-            ones = digit_map.get(parts[1], 0)
-
-        val = tens * 10 + ones
-        return val if val > 0 else None
-
-    # 沒有「十」，視為個位數
-    if len(s) == 1:
-        return digit_map.get(s, None)
-
-    return None
+    return results
 
 
-def extract_index_from_text(text: str):
-    """
-    從句子裡抓出「第幾則」：
-    - 支援中文數字：第十則、第十三則、第三則…
-    - 支援阿拉伯數字：第10則、第3則…
-    """
-    # 中文數字
-    m = re.search(r'第\s*([一二兩三四五六七八九十〇零]+)\s*[則条條篇筆項篇條]?', text)
-    if m:
-        cn = m.group(1)
-        idx = chinese_numeral_to_int(cn)
-        if idx is not None:
-            return idx
-
-    # 阿拉伯數字「第10則」
-    m = re.search(r'第\s*(\d+)\s*[則条條篇筆項篇條]?', text)
-    if m:
-        try:
-            return int(m.group(1))
-        except ValueError:
-            pass
-
-    # 備援：抓句子裡第一個阿拉伯數字
-    m = re.search(r'(\d+)', text)
-    if m:
-        try:
-            return int(m.group(1))
-        except ValueError:
-            pass
-
-    return None
-
-
-def extract_category_from_text(text: str):
-    """
-    嘗試從使用者輸入中判斷是哪個新聞類別
-    例如：股市新聞 / 股市 / 股票 / 全球 / 國際 / 財經 / 產業...
-    """
-    # 先看正式名稱
-    for key, info in CATEGORIES.items():
-        name = info['name']
-        if name in text or (name + "新聞") in text:
-            return key
-
-    # 再看一些別名
-    synonyms = {
-        "體育": "sports",
-        "國際": "global",
-        "國外": "global",
-        "股票": "stock",
-        "股價": "stock",
-        "財經": "econ",
-        "經濟": "econ",
-        "產業": "econ",
-    }
-    for kw, ck in synonyms.items():
-        if kw in text:
-            return ck
-
-    return None
-
-
-def is_summary_intent(text: str):
-    """
-    判斷這句話是不是「想要摘要」
-    """
-    for trig in SUMMARY_TRIGGERS:
-        if trig in text:
-            return True
-    return False
-
-
-def fetch_article_summary(url: str):
-    """
-    進入單一新聞頁，抓取內文前幾句當作簡易摘要
-    """
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/123.0.0.0 Safari/537.36"
-        )
-    }
-
+# ===================================
+# 摘要功能
+# ===================================
+def summarize_article(url):
+    """簡單抓內文前幾句當摘要"""
     try:
-        resp = requests.get(url, headers=headers, timeout=10)
+        resp = requests.get(url, timeout=10)
         resp.raise_for_status()
     except Exception as e:
-        print(f"❌ 取得單篇新聞失敗：{e}")
+        print(f"[summary] 取得文章失敗: {e}")
         return None
 
     soup = BeautifulSoup(resp.text, 'html.parser')
 
-    # 嘗試幾種常見結構
-    paragraphs = (
-        soup.select('#story_body_content p') or
-        soup.select('section.article-content__editor p') or
-        soup.select('article p') or
-        soup.select('p')
-    )
+    # 嘗試幾種常見的內容容器
+    paragraphs = soup.select('section#story_body_content p')
+    if not paragraphs:
+        paragraphs = soup.select('div.article-content__paragraph p')
+    if not paragraphs:
+        paragraphs = soup.select('p')
 
     texts = [p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)]
     if not texts:
         return None
 
-    full = "".join(texts)
-    if len(full) > 120:
-        return full[:120] + "……"
-    return full
+    full = " ".join(texts)
+    sentences = re.split(r'[。！？!?]', full)
+
+    summary = ""
+    for s in sentences:
+        s = s.strip()
+        if not s:
+            continue
+        if len(summary) + len(s) > 120 and summary:
+            break
+        summary += s + "。"
+        if len(summary) >= 150:
+            break
+
+    return summary or texts[0]
 
 
-def build_news_summary_reply(category_key: str, index: int):
+def try_handle_summary_request(user_text, norm_text, chat_id, event):
     """
-    組出「某類別第 index 則新聞」的摘要回覆文字
+    嘗試處理「第 N 則摘要」的需求。
+    回傳 True 表示已處理並回覆。
     """
-    if category_key not in CATEGORIES:
-        return "看不懂你說的是哪個新聞類別，可以再跟我說一次嗎？"
+    if ("摘要" not in norm_text) and ("大意" not in norm_text) and ("summary" not in norm_text):
+        return False
 
-    if index is None or index <= 0:
-        return "我沒有聽清楚你說第幾則，試試看\n「請告訴我股市新聞第 3 則摘要」這種說法～"
+    m = re.search(r"第(\d+)則", norm_text)
+    if not m:
+        return False
 
+    index = int(m.group(1))
+    cat_keys = detect_categories_from_text(norm_text)
+    if not cat_keys:
+        return False
+
+    category_key = cat_keys[0]
     cname = CATEGORIES[category_key]['name']
-    news_list = scrape_udn_category(category_key)
-    if not news_list:
-        return f"目前暫時抓不到 {cname} 新聞，稍後再試試看唷！"
 
-    if index > len(news_list):
-        return f"目前 {cname} 新聞只有 {len(news_list)} 則，我找不到第 {index} 則 QQ"
+    chat_cache = last_news_cache.get(chat_id, {})
+    news_list = chat_cache.get(category_key)
+
+    if not news_list or index < 1 or index > len(news_list):
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(
+                text=f'目前找不到「{cname}新聞 第{index}則」，可能你還沒看過那一頁的新聞，請先用按鈕把那一則新聞叫出來喔！'
+            )
+        )
+        return True
 
     item = news_list[index - 1]
-    title = item['標題']
-    url = item['連結']
+    summary = summarize_article(item['連結'])
 
-    summary = fetch_article_summary(url)
     if not summary:
-        return (
-            f"【{cname}新聞 第 {index} 則】\n"
-            f"{title}\n\n"
-            f"抱歉這篇我沒有成功抓到內文，你可以點連結直接看：\n{url}"
+        text = (
+            f"{cname}新聞 第{index}則：\n"
+            f"{item['標題']}\n{item['連結']}\n\n"
+            "目前暫時無法抓到摘要，請直接點連結看全文 🙏"
+        )
+    else:
+        text = (
+            f"{cname}新聞 第{index}則 摘要：\n"
+            f"{item['標題']}\n\n"
+            f"{summary}\n\n"
+            f"原文連結：{item['連結']}"
         )
 
-    reply_text = (
-        f"【{cname}新聞 第 {index} 則摘要】\n"
-        f"{title}\n\n"
-        f"📝 內容大意：\n{summary}\n\n"
-        f"👉 完整內文：\n{url}"
-    )
-    return reply_text
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=text))
+    return True
 
 
 # ==========================
@@ -601,7 +587,8 @@ def handle_follow(event):
         "1️⃣ 查看【運動、全球、股市、社會、產經】的最新新聞（每次 5 則），\n"
         "   同一類別可以往後看 6～10、11～15 ...。\n"
         "2️⃣ 根據你看過的新聞標題，做詞頻柱狀圖＋文字雲，幫你做簡單的文字探勘分析。\n"
-        "3️⃣ 針對某一則新聞，幫你抓出內文摘要、看看情緒是偏正向、負向還是中立。\n\n"
+        "3️⃣ 幫你做各類新聞的情緒分析，還可以看五大類情緒比較。\n"
+        "4️⃣ 想看某一則新聞的摘要，也可以跟我說「股市新聞第3則摘要」。\n\n"
         "之後你只要跟我說「我想看新聞」或任何訊息，我都會請你先選擇新聞類別 😊"
     )
     msg1 = TextSendMessage(text=intro_text)
@@ -621,31 +608,41 @@ def handle_follow(event):
 def handle_text_message(event):
     try:
         user_text = event.message.text.strip()
-        lower_text = user_text.lower()
+        norm = user_text.replace(" ", "").lower()
         chat_id = get_chat_id(event)
 
-        # === 使用者說「謝謝 / 感謝」之類 ===
-        if any(key in user_text for key in THANK_TRIGGERS):
+        # === 1. 重置指令判斷 ===
+        reset_target = detect_reset_target(norm)
+        if reset_target:
+            if reset_target == "all":
+                reset_all_for_chat(chat_id)
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    TextSendMessage(text='已經幫你把所有新聞類別的紀錄清空，下次會從最新第 1～5 則重新開始喔！')
+                )
+                return
+            else:
+                reset_category_for_chat(chat_id, reset_target)
+                cname = CATEGORIES[reset_target]['name']
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    TextSendMessage(text=f'已幫你把「{cname}新聞」的紀錄清空，下次會從最新第 1～5 則開始。')
+                )
+                return
+
+        # === 2. 感謝類關鍵字 ===
+        if any(k in norm for k in ["謝謝", "感謝", "thx", "thanks", "thankyou", "感恩"]):
             line_bot_api.reply_message(
                 event.reply_token,
-                TextSendMessage(text="不客氣～很高興能幫上忙！歡迎下次再來看新聞或做分析 😊")
+                TextSendMessage(text='不客氣～很高興能幫上忙！如果還想看其他新聞或做分析，隨時再叫我 😄')
             )
             return
 
-        # === 文字雲相關指令 ===
-        if "文字雲" in user_text.replace(" ", ""):
-            category_key = None
-
-            if "運動" in user_text:
-                category_key = 'sports'
-            elif "全球" in user_text or "國際" in user_text:
-                category_key = 'global'
-            elif "股市" in user_text or "股票" in user_text:
-                category_key = 'stock'
-            elif "社會" in user_text:
-                category_key = 'social'
-            elif "產經" in user_text or "財經" in user_text or "產業" in user_text:
-                category_key = 'econ'
+        # === 3. 文字雲相關指令 ===
+        if "文字雲" in norm:
+            # 看有沒有指定類別
+            cats = detect_categories_from_text(norm)
+            category_key = cats[0] if cats else None
 
             freq_url, image_url = generate_wordcloud_for_chat(chat_id, category_key)
 
@@ -655,10 +652,7 @@ def handle_text_message(event):
                     msg = f'目前還沒有任何「{cname}新聞」的標題可以做文字雲，請先多看幾則 {cname} 新聞喔！'
                 else:
                     msg = '你目前還沒有看過任何新聞（或尚未累積足夠標題），請先點選各類別新聞按鈕喔！'
-                line_bot_api.reply_message(
-                    event.reply_token,
-                    TextSendMessage(text=msg)
-                )
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=msg))
                 return
 
             messages = []
@@ -679,38 +673,81 @@ def handle_text_message(event):
             line_bot_api.reply_message(event.reply_token, messages)
             return
 
-        # === 情緒分析指令（只要句子裡有「情緒」＋「分析 / 看」之類） ===
-        if "情緒" in user_text and ("分析" in user_text or "看" in user_text or "判斷" in user_text):
-            msg = TextSendMessage(
-                text='請問你要做哪一個類別的情緒分析呢？',
-                quick_reply=build_category_quick_reply(action_type="sentiment")
-            )
-            line_bot_api.reply_message(event.reply_token, msg)
-            return
+        # === 4. 情緒分析指令 ===
+        if ("情緒分析" in norm) or ("情緒" in norm and "分析" in norm):
+            cats = detect_categories_from_text(norm)
 
-        # === 摘要相關 ===
-        if is_summary_intent(user_text):
-            cat_key = extract_category_from_text(user_text)
-            index = extract_index_from_text(user_text)
+            # 若有指定類別 → 單一類別情緒分析
+            if cats:
+                category_key = cats[0]
+                cname = CATEGORIES[category_key]['name']
+                result = analyze_sentiment_for_chat(chat_id, category_key)
 
-            if cat_key and index:
-                reply_text = build_news_summary_reply(cat_key, index)
+                if not result:
+                    line_bot_api.reply_message(
+                        event.reply_token,
+                        TextSendMessage(
+                            text=f'目前還沒有足夠的「{cname}新聞」標題可以做情緒分析，請先多看幾則 {cname} 新聞喔！'
+                        )
+                    )
+                    return
+
+                total, pos, neg, neu, label = result
+                reply_text = (
+                    f'【{cname}新聞 情緒分析】\n'
+                    f'目前已累積標題數：{total} 則\n\n'
+                    f'🙂 正向：{pos} 則\n'
+                    f'☹️ 負向：{neg} 則\n'
+                    f'😐 中立：{neu} 則\n\n'
+                    f'➡️ {label}'
+                )
+
                 line_bot_api.reply_message(
                     event.reply_token,
                     TextSendMessage(text=reply_text)
                 )
                 return
-            else:
+
+            # 沒有指定類別 → 做「五大類情緒比較」（只列出有資料的類別）
+            all_result = analyze_all_sentiments_for_chat(chat_id)
+            if not all_result:
                 line_bot_api.reply_message(
                     event.reply_token,
-                    TextSendMessage(
-                        text="想看哪一則新聞的摘要呢？可以這樣問我：\n"
-                             "例如：「請告訴我股市新聞第 3 則摘要」"
-                    )
+                    TextSendMessage(text='目前還沒有足夠的新聞標題可以做情緒分析，請先多看幾則各類新聞喔！')
                 )
                 return
 
-        # === 其他文字 → 類別選擇泡泡（看新聞） ===
+            lines = ["【五大新聞情緒比較】"]
+            for key in CATEGORIES.keys():
+                if key not in all_result:
+                    continue
+                cname = CATEGORIES[key]['name']
+                total, pos, neg, neu, label = all_result[key]
+
+                if "雙極化" in label:
+                    short = "雙極化"
+                elif "正向" in label and "負向" not in label:
+                    short = "偏正向"
+                elif "負向" in label and "正向" not in label:
+                    short = "偏負向"
+                else:
+                    short = "中立"
+
+                line_txt = f"{cname}：🙂 {pos} / ☹️ {neg} / 😐 {neu}（{short}）"
+                lines.append(line_txt)
+
+            reply_text = "\n".join(lines)
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text=reply_text)
+            )
+            return
+
+        # === 5. 摘要請求 ===
+        if try_handle_summary_request(user_text, norm, chat_id, event):
+            return
+
+        # === 6. 其他文字 → 類別選擇泡泡 ===
         msg = TextSendMessage(
             text='請選擇想看的新聞類別：',
             quick_reply=build_category_quick_reply(action_type="news")
@@ -718,7 +755,7 @@ def handle_text_message(event):
 
         line_bot_api.reply_message(event.reply_token, msg)
 
-    except Exception:
+    except Exception as e:
         print("[handle_text_message] error:", traceback.format_exc())
         line_bot_api.reply_message(
             event.reply_token,
@@ -764,6 +801,11 @@ def handle_postback(event):
                 )
                 return
 
+            # 把這次抓到的完整列表先存起來，給摘要用
+            chat_cache = last_news_cache.get(chat_id, {})
+            chat_cache[category_key] = news_list
+            last_news_cache[chat_id] = chat_cache
+
             start_idx = (current_page - 1) * PAGE_SIZE
             end_idx = current_page * PAGE_SIZE
             page_items = news_list[start_idx:end_idx]
@@ -773,27 +815,23 @@ def handle_postback(event):
                     event.reply_token,
                     TextSendMessage(text=f'{cname}新聞已經沒有更多最新內容了，我幫你從第一頁重新開始喔！')
                 )
-                chat_state[category_key] = 1
-                news_page_state[chat_id] = chat_state
-                seen_titles_state[chat_id] = {}
+                # 重置該類頁數 & 相關紀錄
+                reset_category_for_chat(chat_id, category_key)
                 return
 
-            # 累積標題（給文字雲 / 情緒分析 / 摘要）
+            # 累積標題（給文字雲 / 情緒分析）
             chat_seen = seen_titles_state.get(chat_id, {})
-            all_list = chat_seen.get('all', [])
             cat_list = chat_seen.get(category_key, [])
 
             for row in page_items:
-                all_list.append(row['標題'])
                 cat_list.append(row['標題'])
 
-            chat_seen['all'] = all_list
             chat_seen[category_key] = cat_list
             seen_titles_state[chat_id] = chat_seen
 
             print(
                 f"[news] chat_id={chat_id}, category={category_key}, "
-                f"累積全部標題數={len(all_list)}, 該類別標題數={len(cat_list)}"
+                f"該類別累積標題數={len(cat_list)}"
             )
 
             # 將本頁 5 則新聞組成一個文字框
@@ -813,7 +851,7 @@ def handle_postback(event):
             news_page_state[chat_id] = chat_state
             return
 
-        # ===== 情緒分析 =====
+        # ===== 情緒分析（從 quick reply 選特定類別） =====
         if action == 'sentiment':
             category_key = params.get('cat', [''])[0]
             if category_key not in CATEGORIES:
@@ -857,7 +895,7 @@ def handle_postback(event):
             TextSendMessage(text='這個功能尚未支援唷！')
         )
 
-    except Exception:
+    except Exception as e:
         print("[handle_postback] error:", traceback.format_exc())
         line_bot_api.reply_message(
             event.reply_token,
