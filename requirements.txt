@@ -1,7 +1,9 @@
 Flask
+gunicorn
 line-bot-sdk
 requests
 beautifulsoup4
 wordcloud
 jieba
 matplotlib
+
