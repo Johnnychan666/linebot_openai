@@ -410,18 +410,29 @@ def analyze_sentiment_for_chat(chat_id, category_key):
     if total == 0:
         return None
 
-    if pos > neg:
-        label = "偏正向"
-    elif neg > pos:
-        label = "偏負向"
-    else:
-        label = "中立"
+    # === 用出現次數最多的那個來決定「偏什麼向」 ===
+    max_count = max(pos, neg, neu)
+    winners = []
+    if pos == max_count:
+        winners.append("pos")
+    if neg == max_count:
+        winners.append("neg")
+    if neu == max_count:
+        winners.append("neu")
 
-    # 雙極化：正向、負向都不少
-    if pos >= 3 and neg >= 3:
-        label = "雙極化"
+    if len(winners) == 1:
+        if winners[0] == "pos":
+            label = "偏正向"
+        elif winners[0] == "neg":
+            label = "偏負向"
+        else:  # "neu"
+            label = "偏中立"
+    else:
+        # 出現次數打成平手，就說「都差不多」
+        label = "都差不多"
 
     return (total, pos, neg, neu, label)
+
 
 
 # ===================================
